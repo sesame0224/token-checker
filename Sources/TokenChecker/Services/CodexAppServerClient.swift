@@ -434,7 +434,11 @@ actor CodexAppServerClient {
         let envelope = RPCOutbound(method: method, id: id, params: params)
         var data = try JSONEncoder().encode(envelope)
         data.append(0x0A)
-        stdin.fileHandleForWriting.write(data)
+        do {
+            try stdin.fileHandleForWriting.write(contentsOf: data)
+        } catch {
+            throw DomainError.codexProcessExited
+        }
 
         // タイムアウト監視タスクを別途起動
         let timeoutTask = Task { [weak self] in
