@@ -405,9 +405,8 @@ actor CodexAppServerClient {
     /// 1 リクエストを投げて、レスポンスかタイムアウトのどちらかで完了する。
     ///
     /// 競合状態の扱い：
-    /// - 書き込みは actor isolated な同期処理として実行（hop なし）
-    /// - `withCheckedThrowingContinuation` のクロージャ本体も同 actor 内で動くので
-    ///   `pending[id] = cont` は atomic に登録される
+    /// - `pending[id] = cont` を登録してから stdin に書き込む。Codex app-server は
+    ///   localhost の子プロセスなので、書き込み直後に応答が返ることがある。
     /// - タイムアウト Task が `cancelPending(id:)` を呼ぶことで継続が確実に解決される
     /// - レスポンスが先に来た場合は `defer` でタイムアウト Task を cancel して終了
     private func request<P: Encodable>(method: String, params: P) async throws -> RPCInbound {
@@ -416,11 +415,9 @@ actor CodexAppServerClient {
         nextId += 1
         let timeout = requestTimeout
 
-        // 同期的にエンコードして書き込み（actor 内、hop なし）
         let envelope = RPCOutbound(method: method, id: id, params: params)
         var data = try JSONEncoder().encode(envelope)
         data.append(0x0A)
-        stdin.fileHandleForWriting.write(data)
 
         // タイムアウト監視タスクを別途起動
         let timeoutTask = Task { [weak self] in
@@ -432,8 +429,13 @@ actor CodexAppServerClient {
         defer { timeoutTask.cancel() }
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<RPCInbound, Error>) in
-            // クロージャは actor isolated な同期コンテキストで実行される
             pending[id] = cont
+            do {
+                try stdin.fileHandleForWriting.write(contentsOf: data)
+            } catch {
+                pending.removeValue(forKey: id)
+                cont.resume(throwing: DomainError.codexProcessExited)
+            }
         }
     }
 
